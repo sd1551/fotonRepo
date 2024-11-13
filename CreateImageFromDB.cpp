@@ -1,4 +1,4 @@
-﻿#include <opencv2/opencv.hpp>
+#include <opencv2/opencv.hpp>
 #include <iostream>
 #include <sqlite3.h>
 #include <boost/program_options.hpp>
@@ -7,22 +7,22 @@
 
 namespace po = boost::program_options;
 
-// Функция для получения цвета тайла
-cv::Scalar getTileColor(int state) {
-    switch (state) {
-    case 0: return cv::Scalar(0, 255, 0);   // Зеленый - success
-    case 1: return cv::Scalar(0, 0, 255);   // Красный - queued
-    case 2: return cv::Scalar(255, 0, 0);   // Синий - no_connection
-    case 3: return cv::Scalar(0, 255, 255); // Желтый - general_http_error_code
-    case 4: return cv::Scalar(255, 255, 0); // Циан - http_404_code
-    case 5: return cv::Scalar(255, 0, 255); // Магента - other_query_error
-    case 6: return cv::Scalar(128, 128, 128); // Серый - other
-    case 7: return cv::Scalar(0, 128, 255);   // Оранжевый - connection_timeout
-    default: return cv::Scalar(0, 0, 0);   // Черный - неизвестное состояние
+// Функция для получения цвета уровня масштаба
+cv::Scalar getZoomLevelColor(int zoomLevel) {
+    switch (zoomLevel) {
+    case 9: return cv::Scalar(0, 255, 255);   // Желтый
+    case 10: return cv::Scalar(255, 255, 0);  // Голубой
+    case 11: return cv::Scalar(255, 0, 255);  // Магента
+    case 12: return cv::Scalar(128, 128, 128); // Серый
+    case 13: return cv::Scalar(0, 128, 255);  // Оранжевый
+    case 14: return cv::Scalar(0, 255, 0);    // Зеленый
+    case 15: return cv::Scalar(255, 0, 0);    // Красный
+    case 16: return cv::Scalar(0, 0, 255);    // Синий
+    default: return cv::Scalar(0, 0, 0);      // Черный (нет пикселей)
     }
 }
 
-// Функция для получения названий таблиц
+// Функция для получения отсортированных названий таблиц
 std::vector<std::string> getTableNames(sqlite3* db) {
     const char* sqlQuery = "SELECT name FROM sqlite_master WHERE type='table';";
     sqlite3_stmt* stmt;
@@ -39,34 +39,41 @@ std::vector<std::string> getTableNames(sqlite3* db) {
     if (rc != SQLITE_DONE) throw std::runtime_error("Ошибка при выполнении SQL-запроса для получения таблиц: " + std::string(sqlite3_errmsg(db)));
 
     sqlite3_finalize(stmt);
+
+    // Сортируем таблицы по уровню масштаба
+    std::sort(tableNames.begin(), tableNames.end(), [](const std::string& a, const std::string& b) {
+        return std::stoi(a.substr(5)) < std::stoi(b.substr(5));
+        });
+
     return tableNames;
 }
 
-// Функция для обработки тайлов таблицы и заполнения изображения
-void processTileTable(sqlite3* db, const std::string& tableName, cv::Mat& image, int imgSize) {
-    std::string sqlTileQuery = "SELECT y, x, state FROM " + tableName;
-    sqlite3_stmt* tileStmt;
-    int rc = sqlite3_prepare_v2(db, sqlTileQuery.c_str(), -1, &tileStmt, nullptr);
-    if (rc != SQLITE_OK) throw std::runtime_error("Не удалось подготовить SQL-запрос для получения тайлов: " + std::string(sqlite3_errmsg(db)));
+void processTileTables(sqlite3* db, const std::vector<std::string>& tableNames, cv::Mat& image, int imgSize) {
+    for (const auto& tableName : tableNames) {
+        std::string sqlTileQuery = "SELECT y, x, state FROM " + tableName;
+        sqlite3_stmt* tileStmt;
+        int rc = sqlite3_prepare_v2(db, sqlTileQuery.c_str(), -1, &tileStmt, nullptr);
+        if (rc != SQLITE_OK) throw std::runtime_error("Не удалось подготовить SQL-запрос для получения тайлов: " + std::string(sqlite3_errmsg(db)));
 
-    int zoomLevel = std::stoi(tableName.substr(5));
-    int tileSize = imgSize / (1 << zoomLevel);
+        int zoomLevel = std::stoi(tableName.substr(5));
+        int tileSize = imgSize / (1 << zoomLevel);
 
-    while ((rc = sqlite3_step(tileStmt)) == SQLITE_ROW) {
-        int y = sqlite3_column_int(tileStmt, 0);
-        int x = sqlite3_column_int(tileStmt, 1);
-        int state = sqlite3_column_int(tileStmt, 2);
+        while ((rc = sqlite3_step(tileStmt)) == SQLITE_ROW) {
+            int y = sqlite3_column_int(tileStmt, 0);
+            int x = sqlite3_column_int(tileStmt, 1);
+            int state = sqlite3_column_int(tileStmt, 2);
 
-        int imgY = y * tileSize;
-        int imgX = x * tileSize;
+            int imgY = y * tileSize;
+            int imgX = x * tileSize;
 
-        cv::Scalar color = getTileColor(state);
-        cv::rectangle(image, cv::Point(imgX, imgY), cv::Point(imgX + tileSize, imgY + tileSize), color, cv::FILLED);
+            // Окрашиваем пиксель цветом текущего уровня масштаба
+            cv::rectangle(image, cv::Point(imgX, imgY), cv::Point(imgX + tileSize, imgY + tileSize), getZoomLevelColor(zoomLevel), cv::FILLED);
+        }
+
+        sqlite3_finalize(tileStmt);
     }
-    if (rc != SQLITE_DONE) throw std::runtime_error("Ошибка при выполнении SQL-запроса для получения тайлов: " + std::string(sqlite3_errmsg(db)));
-
-    sqlite3_finalize(tileStmt);
 }
+
 
 int main(int argc, char* argv[]) {
     setlocale(LC_ALL, "russian");
@@ -94,7 +101,7 @@ int main(int argc, char* argv[]) {
         const int imgSize = 1 << zoomOutLevel;
 
         cv::Mat image(imgSize, imgSize, CV_8UC3);
-        image.setTo(getTileColor(6)); // Фоновый цвет (серый)
+        image.setTo(getZoomLevelColor(0)); // Фоновый цвет
 
         for (const auto& dbFile : dbFiles) {
             sqlite3* db;
@@ -102,9 +109,8 @@ int main(int argc, char* argv[]) {
             if (rc != SQLITE_OK) throw std::runtime_error("Не удалось открыть базу данных " + dbFile + ": " + std::string(sqlite3_errmsg(db)));
 
             auto tableNames = getTableNames(db);
-            for (const auto& tableName : tableNames) {
-                processTileTable(db, tableName, image, imgSize);
-            }
+            processTileTables(db, tableNames, image, imgSize);
+            
 
             sqlite3_close(db);
         }
