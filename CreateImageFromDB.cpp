@@ -7,6 +7,12 @@
 
 namespace po = boost::program_options;
 
+struct TableInfo {
+    std::string tableName;
+    int zoomLevel;
+    std::string dbFile;
+};
+
 // Функция для получения цвета уровня масштаба
 cv::Scalar getZoomLevelColor(int zoomLevel) {
     switch (zoomLevel) {
@@ -23,39 +29,35 @@ cv::Scalar getZoomLevelColor(int zoomLevel) {
 }
 
 // Функция для получения отсортированных названий таблиц
-std::vector<std::string> getTableNames(sqlite3* db) {
+std::vector<TableInfo> getTableInfos(sqlite3* db, const std::string& dbFile) {
     const char* sqlQuery = "SELECT name FROM sqlite_master WHERE type='table';";
     sqlite3_stmt* stmt;
     int rc = sqlite3_prepare_v2(db, sqlQuery, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) throw std::runtime_error("Не удалось подготовить SQL-запрос для получения таблиц: " + std::string(sqlite3_errmsg(db)));
 
-    std::vector<std::string> tableNames;
+    std::vector<TableInfo> tableInfos;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         const char* tableName = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
         if (tableName && std::string(tableName).find("tiles") == 0) {
-            tableNames.emplace_back(tableName);
+            int zoomLevel = std::stoi(std::string(tableName).substr(5));
+            tableInfos.push_back({ tableName, zoomLevel, dbFile });
         }
     }
     if (rc != SQLITE_DONE) throw std::runtime_error("Ошибка при выполнении SQL-запроса для получения таблиц: " + std::string(sqlite3_errmsg(db)));
 
     sqlite3_finalize(stmt);
-
-    // Сортируем таблицы по уровню масштаба
-    std::sort(tableNames.begin(), tableNames.end(), [](const std::string& a, const std::string& b) {
-        return std::stoi(a.substr(5)) < std::stoi(b.substr(5));
-        });
-
-    return tableNames;
+    return tableInfos;
 }
 
-void processTileTables(sqlite3* db, const std::vector<std::string>& tableNames, cv::Mat& image, int imgSize) {
-    for (const auto& tableName : tableNames) {
-        std::string sqlTileQuery = "SELECT y, x, state FROM " + tableName;
+// Функция для обработки таблиц
+void processTileTables(sqlite3* db, const std::vector<TableInfo>& tableInfos, cv::Mat& image, int imgSize) {
+    for (const auto& tableInfo : tableInfos) {
+        std::string sqlTileQuery = "SELECT y, x, state FROM " + tableInfo.tableName;
         sqlite3_stmt* tileStmt;
         int rc = sqlite3_prepare_v2(db, sqlTileQuery.c_str(), -1, &tileStmt, nullptr);
         if (rc != SQLITE_OK) throw std::runtime_error("Не удалось подготовить SQL-запрос для получения тайлов: " + std::string(sqlite3_errmsg(db)));
 
-        int zoomLevel = std::stoi(tableName.substr(5));
+        int zoomLevel = tableInfo.zoomLevel;
         int tileSize = imgSize / (1 << zoomLevel);
 
         while ((rc = sqlite3_step(tileStmt)) == SQLITE_ROW) {
@@ -73,7 +75,6 @@ void processTileTables(sqlite3* db, const std::vector<std::string>& tableNames, 
         sqlite3_finalize(tileStmt);
     }
 }
-
 
 int main(int argc, char* argv[]) {
     setlocale(LC_ALL, "russian");
@@ -99,18 +100,34 @@ int main(int argc, char* argv[]) {
         }
 
         const int imgSize = 1 << zoomOutLevel;
-
         cv::Mat image(imgSize, imgSize, CV_8UC3);
         image.setTo(getZoomLevelColor(0)); // Фоновый цвет
 
+        // Сбор таблиц из всех БД
+        std::vector<TableInfo> allTableInfos;
         for (const auto& dbFile : dbFiles) {
             sqlite3* db;
             int rc = sqlite3_open_v2(dbFile.c_str(), &db, SQLITE_OPEN_READONLY, NULL);
             if (rc != SQLITE_OK) throw std::runtime_error("Не удалось открыть базу данных " + dbFile + ": " + std::string(sqlite3_errmsg(db)));
 
-            auto tableNames = getTableNames(db);
-            processTileTables(db, tableNames, image, imgSize);
-            
+            auto tableInfos = getTableInfos(db, dbFile);
+            allTableInfos.insert(allTableInfos.end(), tableInfos.begin(), tableInfos.end());
+
+            sqlite3_close(db);
+        }
+
+        // Сортировка всех таблиц по уровню масштаба
+        std::sort(allTableInfos.begin(), allTableInfos.end(), [](const TableInfo& a, const TableInfo& b) {
+            return a.zoomLevel < b.zoomLevel;
+            });
+
+        // Обработка таблиц и создание изображения
+        for (const auto& tableInfo : allTableInfos) {
+            sqlite3* db;
+            int rc = sqlite3_open_v2(tableInfo.dbFile.c_str(), &db, SQLITE_OPEN_READONLY, NULL);
+            if (rc != SQLITE_OK) throw std::runtime_error("Не удалось открыть базу данных " + tableInfo.dbFile + ": " + std::string(sqlite3_errmsg(db)));
+
+            processTileTables(db, { tableInfo }, image, imgSize);
 
             sqlite3_close(db);
         }
