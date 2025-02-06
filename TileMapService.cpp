@@ -5,32 +5,26 @@
 #include <cstdint>
 #include <map>
 #include <sstream>
-#include <algorithm>
 
 namespace fs = std::filesystem;
 
 // Структура заголовка файла tilemap
 struct FileHeader {
-    uint64_t version = 0;         // Версия формата
+    uint64_t version = 1;         // Версия формата
     uint64_t levels_count;        // Число уровней (z-уровни пирамиды)
     uint64_t tiles_block_side;    // Размер блока тайлов (TBS), степень 2
 };
 
 // Структура заголовка уровня
 struct LevelHeader {
-    uint64_t z;       // Уровень пирамиды
-    uint64_t offset;  // Смещение к блокам тайлов
+    uint64_t offset;  // Смещение к таблице блоков тайлов
+    std::vector<uint64_t> tile_block_offsets; // Массив смещений блоков
 };
 
 // Структура записи тайла
 struct TileEntry {
     uint64_t offset;  // Смещение тайла от начала блока
     uint64_t size;    // Размер тайла в байтах (0, если тайл отсутствует)
-};
-
-// Структура блока тайлов
-struct TileBlock {
-    std::vector<TileEntry> tiles; // Список тайлов
 };
 
 // Функция записи tilemap-файла
@@ -44,7 +38,7 @@ void write_tilemap(const std::string& input_dir, const std::string& output_file,
     }
 
     uint64_t max_z = 0;
-    std::map<uint64_t, std::vector<std::pair<std::string, uint64_t>>> tile_files;
+    std::map<uint64_t, std::vector<std::tuple<uint64_t, uint64_t, std::string, uint64_t>>> tile_files;
 
     // Сканируем файлы
     for (const auto& entry : fs::directory_iterator(input_dir)) {
@@ -54,7 +48,7 @@ void write_tilemap(const std::string& input_dir, const std::string& output_file,
             uint64_t x, y, z;
             char delim1, delim2;
             if (iss >> x >> delim1 >> y >> delim2 >> z && delim1 == '_' && delim2 == '_') {
-                tile_files[z].emplace_back(entry.path().string(), fs::file_size(entry));
+                tile_files[z].emplace_back(x, y, entry.path().string(), fs::file_size(entry));
                 max_z = std::max(max_z, z);
             }
         }
@@ -66,7 +60,7 @@ void write_tilemap(const std::string& input_dir, const std::string& output_file,
     }
 
     uint64_t levels_count = max_z + 1;
-    FileHeader header = { 0, levels_count, tbs };
+    FileHeader header = { 1, levels_count, tbs };
     file.write(reinterpret_cast<char*>(&header), sizeof(header));
 
     std::vector<LevelHeader> level_headers(levels_count);
@@ -74,33 +68,30 @@ void write_tilemap(const std::string& input_dir, const std::string& output_file,
 
     // Заполняем заголовки уровней
     for (uint64_t z = 0; z < levels_count; ++z) {
-        level_headers[z] = { z, offset };
+        level_headers[z].offset = offset;
         offset += tile_files[z].size() * sizeof(TileEntry);
     }
-    
+
     file.write(reinterpret_cast<char*>(level_headers.data()), level_headers.size() * sizeof(LevelHeader));
 
-    std::map<uint64_t, TileBlock> tile_blocks;
-    // Создаем блоки тайлов
+    std::map<uint64_t, std::vector<TileEntry>> tile_entries;
     for (const auto& [z, files] : tile_files) {
-        TileBlock block;
-        for (const auto& [path, size] : files) {
-            block.tiles.push_back({ offset, size });
+        std::vector<TileEntry> entries;
+        for (const auto& [x, y, path, size] : files) {
+            entries.push_back({ offset, size });
             offset += size;
         }
-        tile_blocks[z] = block;
+        tile_entries[z] = entries;
     }
 
-    // Записываем блоки тайлов
     for (uint64_t z = 0; z < levels_count; ++z) {
-        if (tile_blocks.find(z) != tile_blocks.end()) {
-            file.write(reinterpret_cast<char*>(tile_blocks[z].tiles.data()), tile_blocks[z].tiles.size() * sizeof(TileEntry));
+        if (tile_entries.find(z) != tile_entries.end()) {
+            file.write(reinterpret_cast<char*>(tile_entries[z].data()), tile_entries[z].size() * sizeof(TileEntry));
         }
     }
 
-    // Записываем данные тайлов
     for (const auto& [z, files] : tile_files) {
-        for (const auto& [path, size] : files) {
+        for (const auto& [x, y, path, size] : files) {
             std::ifstream img_file(path, std::ios::binary);
             std::vector<char> buffer(size);
             img_file.read(buffer.data(), size);
@@ -130,22 +121,20 @@ void read_tilemap(const std::string& input_file, const std::string& output_dir) 
     file.seekg(0, std::ios::end);
     std::streampos file_size = file.tellg();
 
-    for (const auto& level : level_headers) {
+    for (size_t z = 0; z < header.levels_count; ++z) {
         std::vector<TileEntry> entries(header.tiles_block_side * header.tiles_block_side);
-        file.seekg(level.offset, std::ios::beg);
+        file.seekg(level_headers[z].offset, std::ios::beg);
         file.read(reinterpret_cast<char*>(entries.data()), entries.size() * sizeof(TileEntry));
 
         for (size_t i = 0; i < entries.size(); ++i) {
             if (entries[i].size == 0) continue;
 
-            uint64_t x = i % (static_cast<unsigned long long>(1) << level.z);
-            uint64_t y = i / (static_cast<unsigned long long>(1) << level.z);
+            uint64_t x = i % (1ULL << z);
+            uint64_t y = i / (1ULL << z);
 
-            // Формируем уникальное имя для файла, включая координаты и уровень
             std::ostringstream output_filename;
-            output_filename << output_dir << "/" << x << "_" << y << "_" << level.z << ".jpg";
+            output_filename << output_dir << "/" << x << "_" << y << "_" << z << ".jpg";
 
-            // Проверяем, что смещение и размер не выходят за пределы файла
             if (entries[i].offset + entries[i].size > file_size) {
                 continue;
             }
@@ -154,7 +143,6 @@ void read_tilemap(const std::string& input_file, const std::string& output_dir) 
             file.seekg(entries[i].offset, std::ios::beg);
             file.read(buffer.data(), entries[i].size);
 
-            // Записываем данные в файл с уникальным именем
             std::ofstream out_file(output_filename.str(), std::ios::binary);
             out_file.write(buffer.data(), buffer.size());
         }
@@ -162,7 +150,6 @@ void read_tilemap(const std::string& input_file, const std::string& output_dir) 
 
     std::cout << "Тайлы успешно извлечены в " << output_dir << "\n";
 }
-
 
 // Главная функция
 int main(int argc, char* argv[]) {
