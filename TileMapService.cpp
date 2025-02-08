@@ -10,27 +10,24 @@ namespace fs = std::filesystem;
 
 // Структура заголовка файла tilemap
 struct FileHeader {
-    uint64_t version = 1;         // Версия формата
-    uint64_t levels_count;        // Число уровней (z-уровни пирамиды)
-    uint64_t tiles_block_side;    // Размер блока тайлов (TBS), степень 2
+    uint64_t version = 1;
+    uint64_t levels_count;
+    uint64_t tiles_block_side;
 };
 
 // Структура заголовка уровня
 struct LevelHeader {
-    uint64_t offset;  // Смещение к таблице блоков тайлов
-    std::vector<uint64_t> tile_block_offsets; // Массив смещений блоков
+    uint64_t offset; 
+    uint64_t blocks_count;
 };
 
 // Структура записи тайла
 struct TileEntry {
-    uint64_t offset;  // Смещение тайла от начала блока
-    uint64_t size;    // Размер тайла в байтах (0, если тайл отсутствует)
+    uint64_t offset;
+    uint64_t size;
 };
 
-// Функция записи tilemap-файла
 void write_tilemap(const std::string& input_dir, const std::string& output_file, uint64_t tbs) {
-    std::cout << "Начинаем процесс записи tilemap...\n";
-
     std::ofstream file(output_file, std::ios::binary);
     if (!file) {
         std::cerr << "Ошибка открытия " << output_file << " для записи.\n";
@@ -40,7 +37,6 @@ void write_tilemap(const std::string& input_dir, const std::string& output_file,
     uint64_t max_z = 0;
     std::map<uint64_t, std::vector<std::tuple<uint64_t, uint64_t, std::string, uint64_t>>> tile_files;
 
-    // Сканируем файлы
     for (const auto& entry : fs::directory_iterator(input_dir)) {
         if (entry.path().extension() == ".jpg") {
             std::string filename = entry.path().stem().string();
@@ -66,9 +62,9 @@ void write_tilemap(const std::string& input_dir, const std::string& output_file,
     std::vector<LevelHeader> level_headers(levels_count);
     uint64_t offset = sizeof(header) + levels_count * sizeof(LevelHeader);
 
-    // Заполняем заголовки уровней
     for (uint64_t z = 0; z < levels_count; ++z) {
         level_headers[z].offset = offset;
+        level_headers[z].blocks_count = tile_files[z].size();
         offset += tile_files[z].size() * sizeof(TileEntry);
     }
 
@@ -85,7 +81,7 @@ void write_tilemap(const std::string& input_dir, const std::string& output_file,
     }
 
     for (uint64_t z = 0; z < levels_count; ++z) {
-        if (tile_entries.find(z) != tile_entries.end()) {
+        if (!tile_entries[z].empty()) {
             file.write(reinterpret_cast<char*>(tile_entries[z].data()), tile_entries[z].size() * sizeof(TileEntry));
         }
     }
@@ -98,13 +94,10 @@ void write_tilemap(const std::string& input_dir, const std::string& output_file,
             file.write(buffer.data(), size);
         }
     }
-
     std::cout << "Файл " << output_file << " успешно записан.\n";
 }
 
-// Функция чтения tilemap-файла
 void read_tilemap(const std::string& input_file, const std::string& output_dir) {
-    std::cout << "Начинаем процесс чтения tilemap...\n";
     std::ifstream file(input_file, std::ios::binary);
     if (!file) {
         std::cerr << "Ошибка открытия " << input_file << " для чтения.\n";
@@ -115,14 +108,14 @@ void read_tilemap(const std::string& input_file, const std::string& output_dir) 
     file.read(reinterpret_cast<char*>(&header), sizeof(header));
 
     std::vector<LevelHeader> level_headers(header.levels_count);
-    file.read(reinterpret_cast<char*>(level_headers.data()), level_headers.size() * sizeof(LevelHeader));
+    file.read(reinterpret_cast<char*>(level_headers.data()), header.levels_count * sizeof(LevelHeader));
 
     fs::create_directory(output_dir);
     file.seekg(0, std::ios::end);
     std::streampos file_size = file.tellg();
 
     for (size_t z = 0; z < header.levels_count; ++z) {
-        std::vector<TileEntry> entries(header.tiles_block_side * header.tiles_block_side);
+        std::vector<TileEntry> entries(level_headers[z].blocks_count);
         file.seekg(level_headers[z].offset, std::ios::beg);
         file.read(reinterpret_cast<char*>(entries.data()), entries.size() * sizeof(TileEntry));
 
@@ -147,14 +140,10 @@ void read_tilemap(const std::string& input_file, const std::string& output_dir) 
             out_file.write(buffer.data(), buffer.size());
         }
     }
-
     std::cout << "Тайлы успешно извлечены в " << output_dir << "\n";
 }
 
-// Главная функция
 int main(int argc, char* argv[]) {
-    setlocale(LC_ALL, "russian");
-
     if (argc < 4) {
         std::cerr << "Использование:\n"
             << "  Запись: " << argv[0] << " write <папка_с_тайлами> <файл_tilemap> <размер_блока>\n"
@@ -163,7 +152,6 @@ int main(int argc, char* argv[]) {
     }
 
     std::string mode = argv[1];
-
     if (mode == "write") {
         write_tilemap(argv[2], argv[3], std::stoull(argv[4]));
     }
@@ -174,6 +162,5 @@ int main(int argc, char* argv[]) {
         std::cerr << "Неизвестный режим: " << mode << "\n";
         return 1;
     }
-
     return 0;
 }
